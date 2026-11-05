@@ -1,9 +1,15 @@
 version: 2
 updates:
+  # Bumps the SHA-pinned actions in .github/workflows.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Bumps the digest-pinned golang and distroless base images in the Dockerfile.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:

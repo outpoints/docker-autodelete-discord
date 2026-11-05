@@ -1,0 +1,4 @@
+# The Dockerfile fetches the bot's source itself and copies nothing from the
+# build context, so send an empty context. This keeps local files such as
+# config.yml (which holds the bot token) out of every build.
+*

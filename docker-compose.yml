@@ -1,10 +1,16 @@
 services:
   autodelete:
-    image: ghcr.io/ksurl/autodelete-discord
+    image: ghcr.io/outpoints/autodelete-discord:latest
     container_name: autodelete
     ports:
       - 2202:2202
     volumes:
-      - ./config.yml:/app/config.yml
+      - ./config.yml:/app/config.yml:ro
       - ./data:/app/data
     restart: always
+    # Optional hardening. The image works with or without these lines.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

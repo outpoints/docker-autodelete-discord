@@ -1,145 +1,122 @@
 name: build
 
+# Builds the image on every push and pull request. Pushes to GHCR only from
+# main (as :latest and :sha-<commit>) and from v* tags (as :X.Y.Z and :X.Y).
+
 on:
   push:
-    tags:
-      - "*"
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/autodelete-discord
+  PLATFORMS: linux/amd64,linux/arm64,linux/arm/v7
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write # push to GHCR with GITHUB_TOKEN, no personal token
+      id-token: write # sign the build provenance attestation
+      attestations: write
     steps:
-      # - name: Actions Start Discord
-      #   uses: sarisia/actions-status-discord@v1
-      #   if: always()
-      #   with:
-      #     webhook: ${{ secrets.DISCORD_WEBHOOK }}
-      #     title: "Starting new build"
-      #     noprefix: true
-      #     color: 0xf5d442
-
-      - name: Actions Start Ntfy
-        run: |
-          ntfy_message=$(cat << EOF
-          Repo: ${{ github.repository }}
-          Commit: ${{ github.sha }}
-          Ref: ${{ github.ref }}
-          Workflow started
-          EOF
-          )
-          curl \
-            -H "Authorization: Bearer ${{ secrets.NTFY_TOKEN }}" \
-            -H "Title: Build status" \
-            -H "Content-Type: text/plain" \
-            -d "$ntfy_message" \
-            ${{ secrets.NTFY_URL }}
-      
-      - name: Actions Start Pushover
-        run: |
-          pushover_message=$(cat << EOF
-          Repo: ${{ github.repository }}
-          Commit: ${{ github.sha }}
-          Ref: ${{ github.ref }}
-          EOF
-          )          
-          curl -s \
-            --form-string "token=${{ secrets.PUSHOVER_TOKEN }}" \
-            --form-string "user=${{ secrets.PUSHOVER_USER }}" \
-            --form-string "title=Build started" \
-            --form-string "message=$pushover_message" \
-            https://api.pushover.net/1/messages.json
-
-      - name: Checkout repo
-        uses: actions/checkout@v7
-
-      - name: Prepare docker image name
-        id: image_names
-        run: |
-          IMAGES="${GITHUB_REPOSITORY/docker-/},ghcr.io/${GITHUB_REPOSITORY/docker-/}"
-          echo ::set-output name=images::${IMAGES}
-
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v6
+      # Actions are pinned to full commit SHAs. Dependabot keeps them current.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          images: ${{ steps.image_names.outputs.images }}
-          tags: |
-            type=ref,event=tag
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-        with:
-          platforms: all
+          persist-credentials: false
 
       - name: Set up Docker Buildx
-        id: buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Login to GitHub
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=pr
+
+      # Smoke test before anything is pushed: build the amd64 image, then check
+      # it runs as non-root and starts the bot binary.
+      - name: Build amd64 image for testing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: autodelete-discord:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          set -eu
+          user=$(docker image inspect autodelete-discord:test --format '{{.Config.User}}')
+          echo "image user: $user"
+          test "$user" = "65532:65532"
+          # Without a config file the bot prints this message and exits.
+          out=$(docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges autodelete-discord:test 2>&1)
+          echo "$out"
+          echo "$out" | grep -q "Please copy config.yml.example to config.yml"
+
+      - name: Log in to GHCR
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GHCR_TOKEN }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to DockerHub
-        uses: docker/login-action@v4
+      - name: Build and push all platforms
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-      - name: Build image
-        id: docker_build
-        uses: docker/build-push-action@v7
-        with:
-          context: ./
-          file: ./Dockerfile
-          builder: ${{ steps.buildx.outputs.name }}
-          push: true
-          platforms: linux/amd64,linux/arm/v7,linux/arm64
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha, scope=${{ github.workflow }}
-          cache-to: type=gha, scope=${{ github.workflow }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: Image digest
-        run: echo ${{ steps.docker_build.outputs.digest }}
-      
-      # - name: Actions Status Discord
-      #   uses: sarisia/actions-status-discord@v1
-      #   if: always()
-      #   with:
-      #     webhook: ${{ secrets.DISCORD_WEBHOOK }}          
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
 
-      - name: Actions Status Pushover
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          pushover_message=$(cat << EOF
-          Repo: ${{ github.repository }}
-          Commit: ${{ github.sha }}
-          Ref: ${{ github.ref }}
-          EOF
-          )          
-          curl -s \
-          --form-string "token=${{ secrets.PUSHOVER_TOKEN }}" \
-          --form-string "user=${{ secrets.PUSHOVER_USER }}" \
-          --form-string "title=Build status" \
-          --form-string "message=${{ env.pushover_message }}" \
-          https://api.pushover.net/1/messages.json
-
-      - name: Actions Status Ntfy
-        run: |
-          ntfy_message=$(cat << EOF
-          Repo: ${{ github.repository }}
-          Commit: ${{ github.sha }}
-          Ref: ${{ github.ref }}
-          Status: ${{ job.status }}
-          Workflow completed
-          EOF
-          )
-          curl \
-            -H "Authorization: Bearer ${{ secrets.NTFY_TOKEN }}" \
-            -H "Title: Build status" \
-            -H "Content-Type: text/plain" \
-            -d "$ntfy_message" \
-            ${{ secrets.NTFY_URL }}
+          {
+            echo "### Published"
+            echo
+            echo "Digest: \`$DIGEST\`"
+            echo
+            echo "Tags:"
+            echo "$TAGS" | while read -r tag; do echo "- \`$tag\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"
