@@ -104,7 +104,9 @@ docker inspect ghcr.io/outpoints/autodelete-discord:latest \
 
 ## Known scanner findings
 
-Image scanners such as Grype report 4 advisories in `golang.org/x/net` (2 High, 2 Medium). govulncheck confirms the bot never calls the affected code. The fixed version requires raising upstream's `go.mod` to Go 1.25 and upgrading dozens of other modules. That changes language behavior in an old codebase with no tests, so it's left as is.
+Image scanners such as Grype report 4 advisories in the `golang.org/x/net` module (2 High, 2 Medium), including HTTP/2 Rapid Reset. Scanners flag the whole module by version. The affected packages (`http2`, `idna`, `http/httpproxy`) aren't compiled into the bot. The only package it uses from that module is `context/ctxhttp`, which none of the advisories cover, and govulncheck reports nothing reachable. The HTTP/2 and IDNA code the bot does run comes from the Go standard library's own patched copies.
+
+Clearing the scanner findings would mean raising upstream's `go.mod` to Go 1.25 and upgrading dozens of other modules. That changes language behavior in an old codebase with no tests, so it's left as is.
 
 ## License
 
